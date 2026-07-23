@@ -1,0 +1,12 @@
+[Unit]
+Description=Work Louder Codex Micro user service
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/codex-microd
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

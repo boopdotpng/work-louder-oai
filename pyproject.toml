@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "work-louder-oai"
+version = "0.1.0"
+description = "Native Linux daemon and protocol tools for the Work Louder Codex Micro"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["codex-micro", "hid", "linux", "rgb", "work-louder"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: No Input/Output (Daemon)",
+  "Intended Audience :: Developers",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: System :: Hardware :: Hardware Drivers",
+]
+
+[project.urls]
+Homepage = "https://github.com/boopdotpng/work-louder-oai"
+Issues = "https://github.com/boopdotpng/work-louder-oai/issues"
+Repository = "https://github.com/boopdotpng/work-louder-oai"
+
+[project.scripts]
+codex-microctl = "codex_microctl:main"
+codex-microd = "codex_microd:main"
+codex-micro-probe = "codex_micro:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+py-modules = ["codex_micro", "codex_microctl", "codex_microd"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]

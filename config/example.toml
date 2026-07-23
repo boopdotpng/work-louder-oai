@@ -1,0 +1,10 @@
+# Commands are argv arrays and execute directly without a shell.
+#
+# MIC is the logical wide Mic key. It coalesces raw switches ACT10 and ACT11.
+# Replace these example paths with commands available on your machine.
+[mappings.MIC]
+press = ["/path/to/start-recording"]
+release = ["/path/to/stop-recording"]
+
+[mappings.ACT09]
+press = ["/usr/bin/notify-send", "Codex Micro", "ACT09 pressed"]

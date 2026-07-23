@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "activeProfileId": 0,
+  "profiles": [
+    {
+      "name": "Default",
+      "id": 0,
+      "layers": [
+        {
+          "id": 0,
+          "name": "Layer 1",
+          "color": 16711680,
+          "layout": {
+            "encoders": [["KV_OAI_ENC_CC", "KV_OAI_ENC_CW", "KV_OAI_ENC_CLK"]],
+            "buttons": [],
+            "keymap": [
+              ["KV_OAI_AG00", "KV_OAI_AG01"],
+              ["KV_OAI_AG02", "KV_OAI_AG03", "KV_OAI_AG04", "KV_OAI_AG05"],
+              ["KV_OAI_ACT06", "KV_OAI_ACT07", "KV_OAI_ACT08", "KV_OAI_ACT09"],
+              ["KV_OAI_ACT10", "KV_OAI_ACT11", "KV_OAI_ACT12"]
+            ],
+            "joystick": {"type": "VENDOR", "sectors": []}
+          },
+          "os": 0
+        }
+      ],
+      "macrosUsed": [],
+      "multiActionsUsed": []
+    }
+  ],
+  "multiActions": [],
+  "macros": [],
+  "macrosGroups": [],
+  "multiActionsGroups": [],
+  "deviceSpecifiConfig": null
+}

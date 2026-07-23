@@ -1,0 +1,2 @@
+# Grant the active local session access to the Codex Micro hidraw interface.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="8360", TAG+="uaccess", MODE="0660"
