@@ -40,29 +40,32 @@ Only one process should consume the report-6 response stream. Stop the daemon
 ```bash
 # macOS
 launchctl bootout gui/$(id -u)/com.github.boopdotpng.codex-microd
-codex-micro-probe list --all
-codex-micro-probe status
-codex-micro-probe monitor
-codex-micro-probe rpc fs.list '{"checksum":true}'
+codex-micro probe list --all
+codex-micro probe status
+codex-micro probe monitor
+codex-micro probe rpc fs.list '{"checksum":true}'
+codex-micro probe rpc lights.preview '{"backlight":{"effect":"solid","brightness":0.5,"speed":0.5,"magic":0.5,"color":16711680},"underglow":{"effect":"breath","brightness":0.5,"speed":0.5,"magic":0.5,"color":255}}'
 ./launchd/install.sh
 
 # Linux
 systemctl --user stop codex-microd.service
-codex-micro-probe status
+codex-micro probe status
 systemctl --user start codex-microd.service
 ```
 
 `list` and `monitor` are read-only. `--transport bluetooth|usb` and `--name`
 choose the device the same way the daemon does.
 
-The raw `rpc` subcommand does not filter method names. Treat it like a firmware
-debugging tool, not an application API.
+The raw `rpc` subcommand refuses `sys.bootloader`, `fs.delete`, `fs.write`,
+and `fs.writebin` unless `--unsafe` is passed, but otherwise does not filter
+method names. Treat it like a firmware debugging tool, not an application
+API.
 
 ## Adding a notification
 
 1. Capture the raw JSON object from report `6`, channel `2`.
 2. Add the exact wire shape to `docs/PROTOCOL.md`.
-3. Normalize it in `DeviceWorker._notification`.
+3. Normalize it in `Normalizer::notification` (`src/events.rs`).
 4. Preserve unknown messages as `vendor` events.
 5. Add a hardware-free unit test with a representative notification.
 6. Update `docs/COVERAGE.md` with firmware and test status.
@@ -77,7 +80,8 @@ also coalescing them into the logical wide `MIC` key.
    destructive.
 2. Verify the smallest possible payload on hardware.
 3. Document the wire method and abbreviated fields.
-4. Add a typed method to the daemon API rather than exposing arbitrary RPC.
+4. Add a typed method to `dispatch` in `src/api.rs` rather than exposing
+   arbitrary RPC.
 5. Validate all numbers, colors, IDs, and enums at the API boundary.
 6. Decide whether volatile state should be replayed after reconnect.
 7. Add CLI support only after the daemon method is stable.
@@ -106,7 +110,7 @@ those facts in original code.
 
 When reporting a new result, include:
 
-- Device product and VID/PID as reported by `codex-micro-probe list`
+- Device product and VID/PID as reported by `codex-micro probe list`
 - Firmware version
 - Operating system and USB or Bluetooth transport
 - Request payload or input action

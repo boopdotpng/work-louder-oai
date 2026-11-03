@@ -62,7 +62,7 @@ been visually checked on every zone.
 | --- | --- |
 | Linux hidraw over USB | Verified |
 | Linux hidraw over Bluetooth | Unverified; selected by HID bus `0005` |
-| macOS IOKit over USB | Unverified on hardware; transport logic code-tested with a fake IOKit |
+| macOS IOKit over USB | Unverified on hardware; type-checked, enumeration tested in macOS CI |
 | macOS IOKit over Bluetooth | Unverified on hardware |
 | macOS launchd agent | Unverified on hardware |
 
@@ -75,18 +75,18 @@ is the main open question.
 
 With the daemon stopped and the keyboard connected only over Bluetooth:
 
-1. `codex-micro-probe list --all`: find the keyboard and note `transport`,
+1. `codex-micro probe list --all`: find the keyboard and note `transport`,
    `vendor_id`, `product_id`, and `product`. If it is not marked
    `"codex_micro": true`, pass `--name` with part of its product name.
-2. `codex-micro-probe --transport bluetooth status`: a JSON result proves RPC
+2. `codex-micro probe --transport bluetooth status`: a JSON result proves RPC
    works over Bluetooth.
-3. `codex-micro-probe --transport bluetooth monitor`: press keys, turn the
+3. `codex-micro probe --transport bluetooth monitor`: press keys, turn the
    encoder, and move the joystick. `rpc` lines with `v.oai.hid` and
    `v.oai.rad` prove that input notifications arrive over Bluetooth. If only
    `report` lines appear (ordinary keyboard reports), the firmware does not
    route vendor actions over Bluetooth.
-4. `codex-micro-probe --transport bluetooth agent 0 '#00ff00'`: confirms that
-   output reports work.
+4. Start the daemon and run `codex-micro agent 0 '#00ff00'`: this confirms
+   that output reports work.
 
 Please record the results using the template in
 [EXTENDING.md](EXTENDING.md#live-test-record).

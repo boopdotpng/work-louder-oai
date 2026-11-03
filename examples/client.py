@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal codex-microd client using only the Python standard library."""
+"""Minimal codex-micro daemon client using only the Python standard library."""
 
 from __future__ import annotations
 

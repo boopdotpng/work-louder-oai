@@ -6,18 +6,16 @@ examples.
 
 ## Development setup
 
-The runtime has no third-party dependencies:
-
 ```bash
-python3 -m compileall -q src tests examples
-python3 -m unittest discover -s tests -v
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
-Install the commands from a checkout when live-device testing is needed:
+Install the binary from a checkout when live-device testing is needed:
 
 ```bash
-python3 -m pip install --user --editable .   # Linux
-pipx install --editable .                     # macOS
+cargo install --path .
 ```
 
 ## Pull requests

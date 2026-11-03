@@ -1,7 +1,8 @@
 # Agent guide
 
-This repository is a clean, dependency-free macOS and Linux implementation of
-the Work Louder Codex Micro HID protocol.
+This repository is a small, clean Rust implementation of the Work Louder Codex
+Micro HID protocol for macOS and Linux: one binary that is both the background
+daemon and its CLI.
 
 ## Start here
 
@@ -14,11 +15,16 @@ the Work Louder Codex Micro HID protocol.
 ## Repository map
 
 ```text
-src/codex_micro.py       device selection, hidraw transport, framing, RPC, probe
-src/codex_micro_macos.py IOKit HID transport via ctypes (macOS)
-src/codex_microd.py      device owner, reconnect loop, event normalization, API
-src/codex_microctl.py    CLI client for the daemon socket
-tests/                   hardware-free unit tests
+src/main.rs              argument parsing, daemon startup, signal handling
+src/protocol.rs          report-6 framing, JSON stream decoder, lighting payloads
+src/events.rs            notification normalization, Mic coalescing, joystick sectors
+src/hub.rs               shared state: serialized RPC, subscribers, mappings, replay
+src/api.rs               JSONL Unix-socket server
+src/client.rs            CLI socket client and direct-device probe commands
+src/config.rs            config.toml parsing and validation
+src/device.rs            device identity, selection, backend interface
+src/hid_macos.rs         IOKit backend on a CFRunLoop (macOS)
+src/hid_linux.rs         hidraw backend (Linux)
 docs/                    protocol, API, coverage, and extension notes
 examples/                client/configuration examples and factory keymap
 launchd/                 macOS LaunchAgent template and installer
@@ -31,16 +37,14 @@ udev/                    Linux device access rule
 Run these before committing:
 
 ```bash
-python3 -m compileall -q src tests examples
-python3 -m unittest discover -s tests -v
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo clippy --target aarch64-apple-darwin --all-targets -- -D warnings
 ```
 
-If `ruff` is installed:
-
-```bash
-ruff check .
-ruff format --check .
-```
+The last command type-checks the macOS backend from Linux after
+`rustup target add aarch64-apple-darwin`. It cannot link or run there.
 
 Live-device checks are optional and must be called out separately. Stop the
 daemon before opening the direct probe:
@@ -48,17 +52,18 @@ daemon before opening the direct probe:
 ```bash
 # macOS
 launchctl bootout gui/$(id -u)/com.github.boopdotpng.codex-microd
-codex-micro-probe status
+codex-micro probe status
 ./launchd/install.sh
 
 # Linux
 systemctl --user stop codex-microd.service
-codex-micro-probe status
+codex-micro probe status
 systemctl --user start codex-microd.service
 ```
 
-IOKit code cannot run on Linux CI; keep its logic testable through the fake
-frameworks in `tests/test_transport.py` and the macOS CI job.
+IOKit code cannot run on Linux; keep logic out of `hid_macos.rs` where
+possible so it is covered by the hardware-free tests (`hub::tests::FakeLink`
+simulates a device), and rely on the macOS CI job for the FFI.
 
 ## Safety invariants
 
@@ -75,9 +80,11 @@ frameworks in `tests/test_transport.py` and the macOS CI job.
 
 ## Design conventions
 
-- Python 3.11+ and the standard library only at runtime.
+- Keep the binary small: dependencies are `libc`, `serde_json`, and `toml`.
+  Do not add an async runtime or CLI framework.
 - One process owns the HID descriptor; other programs use the Unix socket.
-- One worker thread serializes firmware RPC calls and owns the transport.
+- One backend thread owns the device; one lock serializes firmware RPC calls.
+- Never block the backend thread on a firmware reply; it delivers replies.
 - Never seize the HID device; its keyboard functions must keep working.
 - Preserve raw vendor events while exposing normalized application events.
 - Unknown notifications should remain observable as `vendor` events.

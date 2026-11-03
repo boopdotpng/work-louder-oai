@@ -1,7 +1,3 @@
+/target/
 __pycache__/
 *.py[cod]
-.coverage
-.venv/
-*.egg-info/
-build/
-dist/

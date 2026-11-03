@@ -4,7 +4,7 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/codex-microd
+ExecStart=%h/.cargo/bin/codex-micro daemon
 Restart=on-failure
 RestartSec=2
 

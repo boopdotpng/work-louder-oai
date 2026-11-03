@@ -39,9 +39,11 @@ The transport comes from the bus field of `HID_ID` in the hidraw `uevent`:
 
 ## macOS IOKit transport
 
-macOS has no hidraw. `src/codex_micro_macos.py` uses IOKit through `ctypes`:
+macOS has no hidraw. `src/hid_macos.rs` calls IOKit directly:
 
-- `IOHIDManagerCopyDevices` enumerates devices; no permission is needed.
+- `IOHIDManagerCopyDevices` on a fresh manager enumerates devices; no
+  permission is needed. This scan runs every 2 seconds only while
+  disconnected.
 - `VendorID`, `ProductID`, `Product`, `Transport`, `MaxInputReportSize`,
   and `MaxOutputReportSize` properties drive selection. `Transport` is `USB`,
   `Bluetooth`, or `Bluetooth Low Energy`.
@@ -52,16 +54,14 @@ macOS has no hidraw. `src/codex_micro_macos.py` uses IOKit through `ctypes`:
   `IOHIDRequestAccess` triggers the one-time prompt.
 - Output: `IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput, 6, report, 64)`
   where `report` includes the leading report ID byte, as on hidraw.
-- Input: `IOHIDDeviceRegisterInputReportCallback` on a private run-loop mode
-  serviced by the owning thread with `CFRunLoopRunInMode`. If a callback's
-  buffer lacks the leading report ID, the transport prepends it so reports
-  match the hidraw layout.
-- Removal: `IOHIDDeviceRegisterRemovalCallback` turns unplugging or a
-  Bluetooth disconnect into an `OSError`, which drives the daemon's reconnect
-  loop.
-
-Open, read, write, and close must happen on one thread because the device is
-scheduled on that thread's run loop.
+- Input: `IOHIDDeviceRegisterInputReportCallback`, scheduled on a dedicated
+  thread's `CFRunLoop`. If a callback's buffer lacks the leading report ID,
+  the backend prepends it so reports match the hidraw layout.
+- Removal: `IOHIDDeviceRegisterRemovalCallback` marks the device gone and
+  restarts the scan timer. The device is released later from the timer,
+  not from inside its own callback.
+- Writes come from client threads and are serialized with removal by a
+  mutex, so a write can never use a released device.
 
 ## Research provenance
 
@@ -390,7 +390,7 @@ Only one process should own the configuration channel at a time.
 Current components:
 
 ```text
-codex-microd
+codex-micro daemon
   device discovery and reconnect
   HID report decoder/encoder
   serialized JSON-RPC request queue
@@ -402,21 +402,22 @@ codex-microd
     perimeter/underglow
   JSONL Unix-socket API
 
-codex-microctl
+codex-micro (CLI)
   status
   events
   agent
   agents
   zones
+  probe list | status | monitor | rpc
 ```
 
 Current commands:
 
 ```text
-codex-microctl status
-codex-microctl events
-codex-microctl agent 0 '#00ff00' --effect breath
-codex-microctl zones --keys '#ffffff' --ambient '#ff6600'
+codex-micro status
+codex-micro events
+codex-micro agent 0 '#00ff00' --effect breath
+codex-micro zones --keys '#ffffff' --ambient '#ff6600'
 ```
 
 An example factory configuration is included at

@@ -1,0 +1,22 @@
+[package]
+name = "codex-micro"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Lightweight macOS and Linux daemon for the Work Louder Codex Micro"
+license = "MIT"
+repository = "https://github.com/boopdotpng/work-louder-oai"
+readme = "README.md"
+keywords = ["codex-micro", "hid", "iokit", "macos", "work-louder"]
+
+[dependencies]
+libc = "0.2"
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = { version = "0.9", default-features = false, features = ["std", "parse", "serde"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

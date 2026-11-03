@@ -2,7 +2,7 @@
 
 ## Goal
 
-`codex-microd` is a long-running per-user service and the only process
+`codex-micro daemon` is a long-running per-user service and the only process
 that opens the Codex Micro HID endpoint. Other applications should never need
 udev permissions or knowledge of HID report framing.
 
@@ -170,7 +170,7 @@ block input handling for other clients.
 The included CLI exposes this stream directly:
 
 ```bash
-codex-microctl events
+codex-micro events
 ```
 
 ## Shortcut strategies

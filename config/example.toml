@@ -1,4 +1,4 @@
-# codex-microd configuration.
+# codex-micro daemon configuration.
 #
 # macOS and Linux: ~/.config/codex-micro/config.toml
 # Reload mappings without restarting:
@@ -19,7 +19,7 @@ name = "Codex Micro"
 [joystick]
 # The analog stick becomes virtual keys JOY0..JOY(n-1). 0 disables them.
 sectors = 4
-# Angle (0..1) at the center of JOY0. Run `codex-microctl events joystick`,
+# Angle (0..1) at the center of JOY0. Run `codex-micro events joystick`,
 # push the stick in the direction you want JOY0 to be, and copy its angle.
 offset = 0.0
 # Press when the stick reaches this distance; release below `release`.
@@ -55,8 +55,8 @@ press = ["/path/to/start-recording"]
 release = ["/path/to/stop-recording"]
 
 [mappings.ACT12]
-# Send a keyboard shortcut (Cmd+Shift+4). The process running codex-microd
-# needs Accessibility permission for System Events keystrokes.
+# Send a keyboard shortcut (Cmd+Shift+4). The codex-micro binary needs
+# Accessibility permission for System Events keystrokes.
 press = [
   "/usr/bin/osascript", "-e",
   "tell application \"System Events\" to key code 21 using {command down, shift down}",

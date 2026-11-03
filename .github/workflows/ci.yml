@@ -9,19 +9,16 @@ permissions:
 
 jobs:
   test:
-    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest]
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
-        include:
-          # Loads the real IOKit bindings and enumerates HID devices.
-          - os: macos-latest
-            python-version: "3.13"
+        # macos-latest runs the real IOKit enumeration test.
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: ${{ matrix.python-version }}
-      - run: python -m compileall -q src tests examples
-      - run: python -m unittest discover -s tests -v
+      - run: rustup component add clippy rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo build --release
+      - run: python3 -m py_compile examples/client.py

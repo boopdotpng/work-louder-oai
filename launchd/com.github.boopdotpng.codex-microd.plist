@@ -1,13 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Template: launchd/install.sh replaces @CODEX_MICROD@ and @HOME@. -->
+<!-- Template: launchd/install.sh replaces @CODEX_MICRO@ and @HOME@. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
   <string>com.github.boopdotpng.codex-microd</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@CODEX_MICROD@</string>
+    <string>@CODEX_MICRO@</string>
+    <string>daemon</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
