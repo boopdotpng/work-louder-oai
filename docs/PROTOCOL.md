@@ -1,7 +1,7 @@
 # Codex Micro HID and firmware protocol
 
-Clean-room protocol notes for native Linux support of the Work Louder Codex
-Micro.
+Clean-room protocol notes for native macOS and Linux support of the Work
+Louder Codex Micro.
 
 ## Reference hardware
 
@@ -13,6 +13,19 @@ Micro.
 The `/dev/hidrawN` number changes after reconnecting. Match USB VID/PID and,
 when needed, serial rather than hard-coding a numbered path.
 
+## Device selection
+
+A HID device is treated as a Codex Micro when either:
+
+- its vendor/product ID is `303a:8360`, or
+- its product name contains `Codex Micro` (configurable)
+
+The name rule exists because a Bluetooth connection advertises its own device
+ID record, which may not repeat the USB IDs. When several matches exist, the
+default `auto` mode prefers Bluetooth, then USB. Among interfaces of the same
+transport, the one with the largest output report wins, since the vendor
+report is the only large output report.
+
 ## Linux permissions
 
 `udev/70-codex-micro.rules` grants the active local session access to the
@@ -20,6 +33,35 @@ Codex Micro hidraw interface with `TAG+="uaccess"`. It does not make the device
 world-writable.
 
 After changing the rule, reload udev and reconnect the device.
+
+The transport comes from the bus field of `HID_ID` in the hidraw `uevent`:
+`0003` is USB and `0005` is Bluetooth.
+
+## macOS IOKit transport
+
+macOS has no hidraw. `src/codex_micro_macos.py` uses IOKit through `ctypes`:
+
+- `IOHIDManagerCopyDevices` enumerates devices; no permission is needed.
+- `VendorID`, `ProductID`, `Product`, `Transport`, `MaxInputReportSize`,
+  and `MaxOutputReportSize` properties drive selection. `Transport` is `USB`,
+  `Bluetooth`, or `Bluetooth Low Energy`.
+- `IOHIDDeviceOpen` uses `kIOHIDOptionsTypeNone`, not seize, so the
+  keyboard, consumer, and pointer reports keep working for the system.
+- Opening a keyboard-class device requires the Input Monitoring privacy
+  permission. Denial returns `kIOReturnNotPermitted` (`0xe00002e2`).
+  `IOHIDRequestAccess` triggers the one-time prompt.
+- Output: `IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput, 6, report, 64)`
+  where `report` includes the leading report ID byte, as on hidraw.
+- Input: `IOHIDDeviceRegisterInputReportCallback` on a private run-loop mode
+  serviced by the owning thread with `CFRunLoopRunInMode`. If a callback's
+  buffer lacks the leading report ID, the transport prepends it so reports
+  match the hidraw layout.
+- Removal: `IOHIDDeviceRegisterRemovalCallback` turns unplugging or a
+  Bluetooth disconnect into an `OSError`, which drives the daemon's reconnect
+  loop.
+
+Open, read, write, and close must happen on one thread because the device is
+scheduled on that thread's run loop.
 
 ## Research provenance
 
@@ -322,8 +364,8 @@ Persistent layer lighting can be represented in `keymap.json`, but persistent
 writes will not be attempted until a backup and restore path is implemented.
 
 The daemon remembers successful `v.oai.rgbcfg` and `v.oai.thstatus` calls in
-memory and replays them after a USB reconnect. It does not write this live
-state to device flash.
+memory and replays them after a reconnect. It does not write this live state
+to device flash.
 
 ## Service input surface
 
@@ -332,6 +374,7 @@ The native service exposes:
 - Press and release for all 13 mechanical keys
 - Encoder counterclockwise, clockwise, and press
 - Normalized joystick direction and magnitude
+- Joystick sectors as virtual `JOY0..JOYn` press/release keys
 - Current profile and layer
 - Battery and charging state
 - Unknown vendor notifications
@@ -386,3 +429,6 @@ Persistent writes remain intentionally disabled.
    notifications?
 2. Does the device emit hotplug-safe state snapshots after reconnect?
 3. Does pressing the joystick produce a distinct event?
+4. Over Bluetooth, does the firmware expose report `6` and deliver
+   `v.oai.hid`/`v.oai.rad` notifications, and which vendor/product IDs and
+   name does it advertise?

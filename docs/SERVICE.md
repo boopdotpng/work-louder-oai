@@ -18,11 +18,15 @@ Virtual-keyboard output and lighting-scene arbitration remain planned.
 
 ## Local transport
 
-Use a Unix domain socket under:
+The daemon listens on a Unix domain socket with mode `0600`:
 
 ```text
-$XDG_RUNTIME_DIR/codex-microd.sock
+macOS: ~/Library/Application Support/codex-micro/codex-microd.sock
+Linux: $XDG_RUNTIME_DIR/codex-microd.sock
 ```
+
+Set `CODEX_MICROD_SOCKET` to override the path for the daemon, the CLI, and
+`examples/client.py`.
 
 Messages are newline-delimited JSON. Each request has an application-generated
 ID so clients can match responses:
@@ -54,11 +58,28 @@ current user.
 
 | Method | Purpose |
 | --- | --- |
-| `device.status` | Firmware, profile, layer, battery, and charging state |
+| `device.status` | Firmware, profile, layer, battery, charging, and connection |
 | `lighting.agent.set` | Update one upper Agent LED |
 | `lighting.agents.set` | Update one or more upper Agent LEDs atomically |
 | `lighting.zones.set` | Update grouped Command LEDs and perimeter |
 | `events.subscribe` | Keep the connection open and stream selected events |
+
+### Status
+
+`device.status` returns the firmware result plus a `connection` member that
+describes the HID device the daemon chose:
+
+```json
+{
+  "id":1,
+  "result":{
+    "version":"v0.4.1","profile_index":0,"layer_index":1,
+    "battery":38,"is_charging":false,
+    "connection":{"transport":"bluetooth","product":"Codex Micro",
+      "vendor_id":"303a","product_id":"8360","path":"iokit:100000a3c", "...":"..."}
+  }
+}
+```
 
 ### Lighting
 
@@ -127,12 +148,19 @@ The daemon acknowledges the request, then streams events:
 {"event":"key","data":{"key":"MIC","action":"press","raw_keys":["ACT10","ACT11"]}}
 {"event":"encoder","data":{"key":"ENC_CW","action":"step","action_code":2}}
 {"event":"joystick","data":{"angle":0.763528,"distance":1}}
+{"event":"joystick.sector","data":{"key":"JOY3","action":"press","action_code":1,"sector":3}}
+{"event":"device","data":{"connected":true,"connection":{"transport":"bluetooth","...":"..."}}}
 ```
 
 An application implements a callback by listening to this stream and invoking
 its own function for matching events. Disconnecting removes the subscription.
-Available filters are `key`, `key.raw`, `encoder`, `joystick`, `device`, and
-`vendor`. Unknown firmware notifications remain observable as `vendor`.
+Available filters are `key`, `key.raw`, `encoder`, `joystick`,
+`joystick.sector`, `device`, and `vendor`. Unknown firmware notifications
+remain observable as `vendor`.
+
+`device` events are sent when the connection state changes. Repeated failed
+reconnect attempts with the same error are not re-sent, so a sleeping
+Bluetooth keyboard does not flood subscribers.
 
 After the subscription acknowledgement, events are ordered as the daemon
 observes them. Each client has a bounded queue; if a slow client falls more
@@ -158,9 +186,20 @@ press = ["/path/to/start-recording"]
 release = ["/path/to/stop-recording"]
 ```
 
-This works independently of GNOME, KDE, or another desktop because the daemon
-handles the button itself. Commands must use an argv array rather than a shell
-string. Restart `codex-microd.service` after editing its configuration.
+This works independently of macOS, GNOME, KDE, or another desktop because the
+daemon handles the button itself. Commands must use an argv array rather than
+a shell string.
+
+Mappable controls and actions:
+
+| Control | Event | Actions |
+| --- | --- | --- |
+| `AG00`..`AG05`, `ACT06`..`ACT09`, `ACT12`, `MIC` | `key` | `press`, `release` |
+| `ENC_CC`, `ENC_CW` | `encoder` | `step` |
+| `ENC_CLK` | `encoder` | `press`, `release` |
+| `JOY0`..`JOYn` | `joystick.sector` | `press`, `release` |
+
+Raw `ACT10`/`ACT11` switches are not mappable; map the logical `MIC` key.
 
 Configuration is loaded from:
 
@@ -168,14 +207,33 @@ Configuration is loaded from:
 ${XDG_CONFIG_HOME:-$HOME/.config}/codex-micro/config.toml
 ```
 
+Send `SIGHUP` to reload `[mappings]` and `[joystick]`; an invalid file is
+reported in the log and the previous mappings stay active. `[device]` changes
+take effect on restart.
+
+```toml
+[device]
+transport = "auto"     # auto (Bluetooth, then USB) | bluetooth | usb
+name = "Codex Micro"   # product-name substring that also identifies it
+
+[joystick]
+sectors = 4            # 0 disables JOY keys; at most 16
+offset = 0.0           # angle at the center of JOY0
+press = 0.6            # distance that presses a sector
+release = 0.4          # distance below which it releases
+```
+
+Sector `JOY0` is centered on `offset`; later sectors follow in increasing
+angle. Moving directly from one sector to another releases the first and
+presses the second.
+
 ### Virtual keyboard chords
 
 Some users will want the desktop environment to retain ownership of shortcut
-configuration. An optional `uinput` adapter can emit a normal chord such as
-`Super+Space`; GNOME, KDE, Sway, or another session then handles it normally.
-
-This introduces one distro/session setup step for `/dev/uinput` permission.
-The daemon's HID and application APIs remain the same.
+configuration. On macOS today, map a key to `osascript` with System Events
+`keystroke`/`key code`; this needs Accessibility permission. A future native
+adapter could post `CGEvent`s on macOS or use `uinput` on Linux to emit a
+normal chord such as `Super+Space`.
 
 Direct command mapping is preferred for the voice button because it avoids
 desktop-specific shortcut configuration and preserves distinct press and

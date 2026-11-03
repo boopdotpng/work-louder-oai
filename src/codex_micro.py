@@ -15,17 +15,21 @@ import select
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from glob import glob
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
-USB_VENDOR = "303A"
-USB_PRODUCT = "8360"
+USB_VENDOR_ID = 0x303A
+USB_PRODUCT_ID = 0x8360
+PRODUCT_NAME = "Codex Micro"
 REPORT_ID = 6
+LOG_CHANNEL = 1
 RPC_CHANNEL = 2
 REPORT_SIZE = 64
 MAX_PAYLOAD = 61
 MAX_RPC_BUFFER = 1024 * 1024
+TRANSPORTS = ("auto", "bluetooth", "usb")
 EFFECT_CODES = {
     "off": 0,
     "solid": 1,
@@ -35,33 +39,186 @@ EFFECT_CODES = {
     "gradient": 5,
     "shallow-breath": 6,
 }
+# Linux HID bus numbers from <linux/input.h>.
+LINUX_BUSES = {0x03: "usb", 0x05: "bluetooth"}
 
 
-def discover_hidraw() -> Path:
-    """Find the Codex Micro hidraw node by VID/PID."""
+def default_socket_path() -> Path:
+    """Per-user daemon socket path, shared by the daemon and its clients."""
+    override = os.environ.get("CODEX_MICROD_SOCKET")
+    if override:
+        return Path(override)
+    if sys.platform == "darwin":
+        return (
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "codex-micro"
+            / "codex-microd.sock"
+        )
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    return Path(runtime) / "codex-microd.sock"
+
+
+@dataclass(frozen=True)
+class DeviceInfo:
+    """One HID device as seen by the operating system."""
+
+    path: str
+    vendor_id: int
+    product_id: int
+    product: str
+    transport: str
+    serial: str = ""
+    max_input_report: int = 0
+    max_output_report: int = 0
+
+    def describe(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["vendor_id"] = f"{self.vendor_id:04x}"
+        value["product_id"] = f"{self.product_id:04x}"
+        return value
+
+
+@dataclass(frozen=True)
+class DeviceSelector:
+    """Which Codex Micro connection to use.
+
+    ``transport="auto"`` prefers Bluetooth and falls back to USB. A device
+    matches when it has the Codex Micro USB IDs or when its product name
+    contains ``name``; Bluetooth connections may advertise different IDs.
+    """
+
+    transport: str = "auto"
+    name: str = PRODUCT_NAME
+
+    def __post_init__(self) -> None:
+        if self.transport not in TRANSPORTS:
+            raise ValueError(f"transport must be one of: {', '.join(TRANSPORTS)}")
+
+    def matches(self, info: DeviceInfo) -> bool:
+        if (info.vendor_id, info.product_id) == (USB_VENDOR_ID, USB_PRODUCT_ID):
+            return True
+        return bool(self.name) and self.name.casefold() in info.product.casefold()
+
+    def select(self, devices: list[DeviceInfo]) -> DeviceInfo:
+        candidates = [info for info in devices if self.matches(info)]
+        if self.transport != "auto":
+            candidates = [c for c in candidates if c.transport == self.transport]
+        if not candidates:
+            where = "" if self.transport == "auto" else f" over {self.transport}"
+            raise RuntimeError(f"Work Louder Codex Micro is not connected{where}")
+        preference = {"bluetooth": 0, "usb": 1}
+        # The vendor report is the largest output report, so a larger output
+        # size breaks ties between several interfaces of the same device.
+        return min(
+            candidates,
+            key=lambda c: (preference.get(c.transport, 2), -c.max_output_report),
+        )
+
+
+class Transport(Protocol):
+    """Raw HID report I/O. Reports include the report ID as byte 0."""
+
+    info: DeviceInfo | None
+
+    def open(self) -> None: ...
+
+    def close(self) -> None: ...
+
+    def read(self, timeout: float) -> bytes | None: ...
+
+    def write(self, report: bytes) -> None: ...
+
+
+def linux_devices() -> list[DeviceInfo]:
+    devices: list[DeviceInfo] = []
     for candidate in sorted(glob("/dev/hidraw*")):
         node = Path(candidate)
         uevent = Path("/sys/class/hidraw") / node.name / "device/uevent"
         try:
-            properties = uevent.read_text()
+            lines = uevent.read_text().splitlines()
         except OSError:
             continue
-        hid_id = next(
-            (
-                line.partition("=")[2]
-                for line in properties.splitlines()
-                if line.startswith("HID_ID=")
-            ),
-            "",
+        properties = dict(line.partition("=")[::2] for line in lines)
+        fields = properties.get("HID_ID", "").split(":")
+        if len(fields) != 3:
+            continue
+        try:
+            bus, vendor_id, product_id = (int(field, 16) for field in fields)
+        except ValueError:
+            continue
+        devices.append(
+            DeviceInfo(
+                path=str(node),
+                vendor_id=vendor_id,
+                product_id=product_id,
+                product=properties.get("HID_NAME", ""),
+                transport=LINUX_BUSES.get(bus, f"bus-{bus:04x}"),
+                serial=properties.get("HID_UNIQ", ""),
+            )
         )
-        fields = hid_id.split(":")
-        if (
-            len(fields) == 3
-            and fields[1].lstrip("0").upper() == USB_VENDOR
-            and fields[2].lstrip("0").upper() == USB_PRODUCT
-        ):
-            return node
-    raise RuntimeError("Work Louder Codex Micro (303a:8360) is not connected")
+    return devices
+
+
+def list_devices() -> list[DeviceInfo]:
+    """Enumerate every HID device visible to this process."""
+    if sys.platform == "darwin":
+        from codex_micro_macos import iokit_devices
+
+        return iokit_devices()
+    if sys.platform.startswith("linux"):
+        return linux_devices()
+    raise RuntimeError(f"unsupported platform: {sys.platform}")
+
+
+class HidrawTransport:
+    """Linux /dev/hidraw transport."""
+
+    def __init__(self, path: Path, info: DeviceInfo | None = None) -> None:
+        self.path = path
+        self.info = info
+        self.fd: int | None = None
+
+    def open(self) -> None:
+        self.fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
+
+    def close(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    def read(self, timeout: float) -> bytes | None:
+        assert self.fd is not None
+        readable, _, _ = select.select([self.fd], [], [], timeout)
+        if not readable:
+            return None
+        try:
+            return os.read(self.fd, REPORT_SIZE)
+        except BlockingIOError:
+            return None
+
+    def write(self, report: bytes) -> None:
+        assert self.fd is not None
+        written = os.write(self.fd, report)
+        if written != len(report):
+            raise RuntimeError(f"short HID write: {written}/{len(report)}")
+
+
+def open_transport(selector: DeviceSelector, path: Path | None = None) -> Transport:
+    """Create an unopened transport for the current platform."""
+    if path is not None:
+        if sys.platform == "darwin":
+            raise RuntimeError("--device is Linux-only; use --transport on macOS")
+        return HidrawTransport(path)
+    if sys.platform == "darwin":
+        from codex_micro_macos import IOKitTransport
+
+        return IOKitTransport(selector)
+    if sys.platform.startswith("linux"):
+        info = selector.select(linux_devices())
+        return HidrawTransport(Path(info.path), info)
+    raise RuntimeError(f"unsupported platform: {sys.platform}")
 
 
 class CodexMicro:
@@ -69,47 +226,58 @@ class CodexMicro:
         self,
         path: Path | None = None,
         on_notification: Callable[[dict[str, Any]], None] | None = None,
+        *,
+        selector: DeviceSelector | None = None,
+        transport: Transport | None = None,
     ) -> None:
-        self.path = path or discover_hidraw()
-        self.fd: int | None = None
+        self.path = path
+        self.selector = selector or DeviceSelector()
+        self.transport = transport
+        self._owns_transport = transport is None
         self.on_notification = on_notification
         self._next_id = 1
         self._rpc_buffer = ""
         self._decoder = json.JSONDecoder()
         self._utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
+    @property
+    def info(self) -> DeviceInfo | None:
+        return self.transport.info if self.transport is not None else None
+
     def __enter__(self) -> CodexMicro:
-        self.fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
-        self.drain()
+        if self.transport is None:
+            self.transport = open_transport(self.selector, self.path)
+        self.transport.open()
+        self._rpc_buffer = ""
+        self._utf8_decoder.reset()
+        try:
+            self.drain()
+        except BaseException:
+            self.__exit__()
+            raise
         return self
 
     def __exit__(self, *_: object) -> None:
-        if self.fd is not None:
-            os.close(self.fd)
-            self.fd = None
+        if self.transport is not None:
+            self.transport.close()
+            if self._owns_transport:
+                self.transport = None
 
-    def drain(self) -> None:
+    def drain(self, limit: int = 256) -> None:
         """Discard already-queued reports before making a request."""
-        assert self.fd is not None
-        while True:
-            readable, _, _ = select.select([self.fd], [], [], 0)
-            if not readable:
-                return
-            try:
-                os.read(self.fd, REPORT_SIZE)
-            except BlockingIOError:
+        assert self.transport is not None
+        for _ in range(limit):
+            if self.transport.read(0) is None:
                 return
 
     def _write_rpc(self, value: dict[str, Any]) -> None:
-        assert self.fd is not None
+        assert self.transport is not None
         encoded = json.dumps(value, separators=(",", ":")).encode()
         for offset in range(0, len(encoded), MAX_PAYLOAD):
             chunk = encoded[offset : offset + MAX_PAYLOAD]
             report = bytes((REPORT_ID, RPC_CHANNEL, len(chunk))) + chunk
             report += bytes(REPORT_SIZE - len(report))
-            written = os.write(self.fd, report)
-            if written != REPORT_SIZE:
-                raise RuntimeError(f"short HID write: {written}/{REPORT_SIZE}")
+            self.transport.write(report)
 
     def _decoded_messages(self, payload: bytes) -> list[dict[str, Any]]:
         self._rpc_buffer += self._utf8_decoder.decode(payload)
@@ -131,19 +299,26 @@ class CodexMicro:
                 messages.append(value)
         return messages
 
-    def read_messages(self, timeout: float) -> list[dict[str, Any]]:
-        """Read and decode the next available report-6 RPC messages."""
-        assert self.fd is not None
-        readable, _, _ = select.select([self.fd], [], [], timeout)
-        if not readable:
-            return []
-        report = os.read(self.fd, REPORT_SIZE)
+    def read_report(self, timeout: float) -> bytes | None:
+        """Read one raw input report of any report ID."""
+        assert self.transport is not None
+        return self.transport.read(timeout)
+
+    def decode_report(self, report: bytes) -> list[dict[str, Any]]:
+        """Decode a report-6 RPC fragment; other reports yield nothing."""
         if len(report) < 3 or report[0] != REPORT_ID:
             return []
         channel, size = report[1], report[2]
         if channel != RPC_CHANNEL or size > MAX_PAYLOAD:
             return []
         return self._decoded_messages(report[3 : 3 + size])
+
+    def read_messages(self, timeout: float) -> list[dict[str, Any]]:
+        """Read and decode the next available report-6 RPC messages."""
+        report = self.read_report(timeout)
+        if report is None:
+            return []
+        return self.decode_report(report)
 
     def poll(self, timeout: float = 0.1) -> None:
         """Dispatch unsolicited device notifications for up to `timeout`."""
@@ -152,7 +327,6 @@ class CodexMicro:
                 self.on_notification(message)
 
     def rpc(self, method: str, params: Any | None = None, timeout: float = 3.0) -> Any:
-        assert self.fd is not None
         request_id = self._next_id
         self._next_id += 1
         request: dict[str, Any] = {"method": method, "id": request_id}
@@ -210,11 +384,68 @@ def oai_side_config(effect: str, brightness: float, color: int) -> dict[str, Any
     }
 
 
+def describe_report(device: CodexMicro, report: bytes) -> list[dict[str, Any]]:
+    """Render one raw input report for the ``monitor`` command."""
+    if len(report) >= 3 and report[0] == REPORT_ID and report[1] == LOG_CHANNEL:
+        size = min(report[2], MAX_PAYLOAD)
+        text = report[3 : 3 + size].decode("utf-8", errors="replace")
+        return [{"log": text}]
+    if len(report) >= 3 and report[0] == REPORT_ID and report[1] == RPC_CHANNEL:
+        return [{"rpc": message} for message in device.decode_report(report)]
+    report_id = report[0] if report else None
+    return [{"report": report_id, "hex": report.hex(" ")}]
+
+
+def list_command(show_all: bool, selector: DeviceSelector) -> int:
+    for info in list_devices():
+        matches = selector.matches(info)
+        if show_all or matches:
+            print(json.dumps({**info.describe(), "codex_micro": matches}))
+    return 0
+
+
+def monitor_command(device: CodexMicro) -> int:
+    info = device.info
+    if info is not None:
+        print(json.dumps({"connected": info.describe()}), flush=True)
+    try:
+        while True:
+            report = device.read_report(1.0)
+            if report is None:
+                continue
+            for line in describe_report(device, report):
+                print(json.dumps(line, ensure_ascii=False), flush=True)
+    except KeyboardInterrupt:
+        return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device", type=Path, help="override /dev/hidraw discovery")
+    parser.add_argument(
+        "--device", type=Path, help="Linux only: override /dev/hidraw discovery"
+    )
+    parser.add_argument(
+        "--transport",
+        choices=TRANSPORTS,
+        default="auto",
+        help="connection to use; auto prefers Bluetooth, then USB",
+    )
+    parser.add_argument(
+        "--name",
+        default=PRODUCT_NAME,
+        help="product-name substring that also identifies the device",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
+    list_parser = commands.add_parser(
+        "list", help="list matching HID devices and their transports"
+    )
+    list_parser.add_argument(
+        "--all", action="store_true", help="include every HID device"
+    )
+    commands.add_parser(
+        "monitor", help="print every input report until interrupted (read-only)"
+    )
     commands.add_parser("status", help="read device status")
 
     rpc_parser = commands.add_parser(
@@ -269,6 +500,20 @@ def main() -> int:
     agents.add_argument("--speed", type=float, default=0.4, metavar="0..1")
 
     args = parser.parse_args()
+    selector = DeviceSelector(args.transport, args.name)
+    if args.command == "list":
+        try:
+            return list_command(args.all, selector)
+        except (OSError, RuntimeError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+    if args.command == "monitor":
+        try:
+            with CodexMicro(args.device, selector=selector) as device:
+                return monitor_command(device)
+        except (OSError, RuntimeError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
     if args.command == "rpc":
         params = json.loads(args.params) if args.params is not None else None
         method = args.method
@@ -319,7 +564,7 @@ def main() -> int:
         ]
 
     try:
-        with CodexMicro(args.device) as device:
+        with CodexMicro(args.device, selector=selector) as device:
             result = device.rpc(method, params)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0

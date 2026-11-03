@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import queue
+import signal
 import socket
 import socketserver
 import stat
@@ -17,16 +18,24 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from codex_micro import EFFECT_CODES, CodexMicro, oai_side_config
+from codex_micro import (
+    EFFECT_CODES,
+    PRODUCT_NAME,
+    TRANSPORTS,
+    CodexMicro,
+    DeviceInfo,
+    DeviceSelector,
+    default_socket_path,
+    oai_side_config,
+)
 
 ACTION_NAMES = {0: "release", 1: "press", 2: "step"}
+MAPPABLE_EVENTS = ("key", "encoder", "joystick.sector")
+MAPPING_ACTIONS = ("press", "release", "step")
 
 
-def default_socket_path() -> Path:
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if runtime:
-        return Path(runtime) / "codex-microd.sock"
-    return Path(f"/run/user/{os.getuid()}") / "codex-microd.sock"
+def log(message: str) -> None:
+    print(f"codex-microd: {message}", flush=True)
 
 
 def default_config_path() -> Path:
@@ -78,36 +87,108 @@ class EventMapper(Protocol):
     def handle(self, event: dict[str, Any]) -> None: ...
 
 
-class CommandMapper:
-    """Execute argv mappings for normalized key actions without a shell."""
+@dataclass(frozen=True)
+class JoystickSectors:
+    """Turn the analog joystick into virtual JOY0..JOYn keys.
 
-    def __init__(self, config_path: Path) -> None:
-        self.mappings: dict[str, dict[str, list[str]]] = {}
-        if not config_path.exists():
-            return
-        with config_path.open("rb") as config_file:
-            document = tomllib.load(config_file)
-        raw_mappings = document.get("mappings", {})
-        if not isinstance(raw_mappings, dict):
-            raise ValueError("config [mappings] must be a table")
-        for key, actions in raw_mappings.items():
-            if not isinstance(actions, dict):
-                raise ValueError(f"mapping {key} must be a table")
-            parsed: dict[str, list[str]] = {}
-            for action, argv in actions.items():
-                if action not in ("press", "release", "step"):
-                    raise ValueError(f"unsupported mapping action: {key}.{action}")
-                if (
-                    not isinstance(argv, list)
-                    or not argv
-                    or not all(isinstance(part, str) and part for part in argv)
-                ):
-                    raise ValueError(f"{key}.{action} must be a non-empty argv array")
-                parsed[action] = argv
-            self.mappings[str(key)] = parsed
+    The circle is divided into ``sectors`` equal slices. ``JOY0`` is centered
+    on ``offset`` and later sectors follow in increasing-angle order. A sector
+    is pressed once the stick reaches ``press`` distance and released when it
+    falls below ``release`` or the stick moves to another sector.
+    """
+
+    sectors: int = 4
+    offset: float = 0.0
+    press: float = 0.6
+    release: float = 0.4
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.sectors, int) or not 0 <= self.sectors <= 16:
+            raise ValueError("joystick sectors must be an integer from 0 through 16")
+        for name in ("offset", "press", "release"):
+            unit_interval(getattr(self, name), f"joystick {name}", 0)
+        if self.release > self.press:
+            raise ValueError("joystick release must not exceed press")
+
+    def sector(self, angle: float) -> int:
+        width = 1 / self.sectors
+        return int(((angle - self.offset + width / 2) % 1.0) / width) % self.sectors
+
+
+@dataclass(frozen=True)
+class DaemonConfig:
+    mappings: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    joystick: JoystickSectors = field(default_factory=JoystickSectors)
+    selector: DeviceSelector = field(default_factory=DeviceSelector)
+
+
+def parse_mappings(raw_mappings: Any) -> dict[str, dict[str, list[str]]]:
+    if not isinstance(raw_mappings, dict):
+        raise ValueError("config [mappings] must be a table")
+    mappings: dict[str, dict[str, list[str]]] = {}
+    for key, actions in raw_mappings.items():
+        if not isinstance(actions, dict):
+            raise ValueError(f"mapping {key} must be a table")
+        parsed: dict[str, list[str]] = {}
+        for action, argv in actions.items():
+            if action not in MAPPING_ACTIONS:
+                raise ValueError(f"unsupported mapping action: {key}.{action}")
+            if (
+                not isinstance(argv, list)
+                or not argv
+                or not all(isinstance(part, str) and part for part in argv)
+            ):
+                raise ValueError(f"{key}.{action} must be a non-empty argv array")
+            parsed[action] = argv
+        mappings[str(key)] = parsed
+    return mappings
+
+
+def load_config(path: Path) -> DaemonConfig:
+    if not path.exists():
+        return DaemonConfig()
+    with path.open("rb") as config_file:
+        document = tomllib.load(config_file)
+
+    joystick = document.get("joystick", {})
+    if not isinstance(joystick, dict):
+        raise ValueError("config [joystick] must be a table")
+    unknown = set(joystick) - {"sectors", "offset", "press", "release"}
+    if unknown:
+        raise ValueError(f"unknown [joystick] settings: {', '.join(sorted(unknown))}")
+
+    device = document.get("device", {})
+    if not isinstance(device, dict):
+        raise ValueError("config [device] must be a table")
+    unknown = set(device) - {"transport", "name"}
+    if unknown:
+        raise ValueError(f"unknown [device] settings: {', '.join(sorted(unknown))}")
+
+    try:
+        sectors = JoystickSectors(
+            **{k: float(v) if k != "sectors" else v for k, v in joystick.items()}
+        )
+    except TypeError as error:
+        raise ValueError(f"invalid [joystick] setting: {error}") from error
+
+    return DaemonConfig(
+        mappings=parse_mappings(document.get("mappings", {})),
+        joystick=sectors,
+        selector=DeviceSelector(
+            transport=str(device.get("transport", "auto")),
+            name=str(device.get("name", PRODUCT_NAME)),
+        ),
+    )
+
+
+class CommandMapper:
+    """Execute argv mappings for normalized control actions without a shell."""
+
+    def __init__(self, mappings: dict[str, dict[str, list[str]]]) -> None:
+        self.mappings = mappings
 
     def handle(self, event: dict[str, Any]) -> None:
-        if event.get("event") != "key":
+        if event.get("event") not in MAPPABLE_EVENTS:
             return
         data = event.get("data")
         if not isinstance(data, dict):
@@ -126,14 +207,23 @@ class CommandMapper:
                 start_new_session=True,
             )
         except OSError as error:
-            print(f"mapping {key}.{action} failed: {error}", flush=True)
+            log(f"mapping {key}.{action} failed: {error}")
 
 
 class DeviceWorker:
     """Own the HID descriptor and serialize calls from all socket clients."""
 
-    def __init__(self, mapper: EventMapper) -> None:
+    def __init__(
+        self,
+        mapper: EventMapper,
+        selector: DeviceSelector | None = None,
+        joystick: JoystickSectors | None = None,
+    ) -> None:
         self.mapper = mapper
+        self.selector = selector or DeviceSelector()
+        self.joystick = joystick or JoystickSectors()
+        self.joystick_sector: int | None = None
+        self.device_info: DeviceInfo | None = None
         self.calls: queue.Queue[DeviceCall] = queue.Queue()
         self.subscribers: set[queue.Queue[dict[str, Any]]] = set()
         self.subscribers_lock = threading.Lock()
@@ -165,7 +255,7 @@ class DeviceWorker:
         return request.result
 
     def remember_lighting(self, method: str, params: Any) -> None:
-        """Remember successful volatile lighting calls for USB reconnects."""
+        """Remember successful volatile lighting calls for reconnects."""
         if method == "v.oai.thstatus" and isinstance(params, list):
             for agent in params:
                 if isinstance(agent, dict) and isinstance(agent.get("id"), int):
@@ -242,6 +332,40 @@ class DeviceWorker:
                 }
             )
 
+    def _joystick_sector_event(self, sector: int, action: int) -> None:
+        self.emit(
+            {
+                "event": "joystick.sector",
+                "data": {
+                    "key": f"JOY{sector}",
+                    "action": ACTION_NAMES[action],
+                    "action_code": action,
+                    "sector": sector,
+                },
+            }
+        )
+
+    def _joystick(self, angle: Any, distance: Any) -> None:
+        settings = self.joystick
+        if settings.sectors == 0:
+            return
+        try:
+            angle = float(angle)
+            distance = float(distance)
+        except (TypeError, ValueError):
+            return
+        active = self.joystick_sector
+        if distance >= settings.press:
+            sector = settings.sector(angle)
+            if sector != active:
+                if active is not None:
+                    self._joystick_sector_event(active, 0)
+                self.joystick_sector = sector
+                self._joystick_sector_event(sector, 1)
+        elif distance < settings.release and active is not None:
+            self.joystick_sector = None
+            self._joystick_sector_event(active, 0)
+
     def _notification(self, message: dict[str, Any]) -> None:
         method = message.get("m")
         params = message.get("p")
@@ -266,13 +390,17 @@ class DeviceWorker:
             else:
                 event = {"event": "key", "data": data}
         elif method == "v.oai.rad":
-            event = {
-                "event": "joystick",
-                "data": {
-                    "angle": params.get("a"),
-                    "distance": params.get("d"),
-                },
-            }
+            self.emit(
+                {
+                    "event": "joystick",
+                    "data": {
+                        "angle": params.get("a"),
+                        "distance": params.get("d"),
+                    },
+                }
+            )
+            self._joystick(params.get("a"), params.get("d"))
+            return
         else:
             event = {
                 "event": "vendor",
@@ -290,13 +418,29 @@ class DeviceWorker:
             request.complete.set()
 
     def _run(self) -> None:
+        last_error: str | None = None
         while not self.stop_requested.is_set():
             try:
-                with CodexMicro(on_notification=self._notification) as device:
+                with CodexMicro(
+                    selector=self.selector, on_notification=self._notification
+                ) as device:
                     self.mic_switches_down.clear()
+                    self.joystick_sector = None
+                    self.device_info = device.info
                     self.restore_lighting(device)
                     self.connected.set()
-                    self.broadcast({"event": "device", "data": {"connected": True}})
+                    last_error = None
+                    connection = device.info.describe() if device.info else {}
+                    log(
+                        "connected"
+                        + (f" over {device.info.transport}" if device.info else "")
+                    )
+                    self.broadcast(
+                        {
+                            "event": "device",
+                            "data": {"connected": True, "connection": connection},
+                        }
+                    )
                     while not self.stop_requested.is_set():
                         try:
                             request = self.calls.get_nowait()
@@ -311,14 +455,22 @@ class DeviceWorker:
                         finally:
                             request.complete.set()
             except (OSError, RuntimeError) as error:
+                was_connected = self.connected.is_set()
                 self.connected.clear()
+                self.device_info = None
                 self._fail_queued_calls(error)
-                self.broadcast(
-                    {
-                        "event": "device",
-                        "data": {"connected": False, "error": str(error)},
-                    }
-                )
+                message = str(error)
+                # Bluetooth devices sleep often; report each state change once
+                # instead of once per reconnect attempt.
+                if was_connected or message != last_error:
+                    log(f"disconnected: {message}")
+                    self.broadcast(
+                        {
+                            "event": "device",
+                            "data": {"connected": False, "error": message},
+                        }
+                    )
+                last_error = message
                 self.stop_requested.wait(1)
         self.connected.clear()
 
@@ -358,7 +510,11 @@ class ApiHandler(socketserver.StreamRequestHandler):
     def dispatch(self, method: str, params: dict[str, Any]) -> Any:
         worker = self.server.worker
         if method == "device.status":
-            return worker.call("device.status")
+            result = worker.call("device.status")
+            info = worker.device_info
+            if isinstance(result, dict) and info is not None:
+                result = {**result, "connection": info.describe()}
+            return result
         if method == "lighting.agent.set":
             agent = self._agent(params)
             return worker.call("v.oai.thstatus", [agent])
@@ -464,16 +620,43 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--socket", type=Path, default=default_socket_path())
     parser.add_argument("--config", type=Path, default=default_config_path())
+    parser.add_argument(
+        "--transport",
+        choices=TRANSPORTS,
+        help="override [device] transport; auto prefers Bluetooth, then USB",
+    )
     args = parser.parse_args()
 
+    config = load_config(args.config)
+    selector = config.selector
+    if args.transport is not None:
+        selector = DeviceSelector(args.transport, selector.name)
     ensure_socket_available(args.socket)
-    mapper = CommandMapper(args.config)
-    worker = DeviceWorker(mapper)
+    worker = DeviceWorker(CommandMapper(config.mappings), selector, config.joystick)
+
+    def reload_config(*_: object) -> None:
+        try:
+            updated = load_config(args.config)
+        except (OSError, ValueError) as error:
+            log(f"config reload failed, keeping previous mappings: {error}")
+            return
+        worker.mapper = CommandMapper(updated.mappings)
+        worker.joystick = updated.joystick
+        log(f"reloaded {args.config} ([device] changes need a restart)")
+
     worker.start()
     try:
         with ApiServer(args.socket, worker) as server:
             os.chmod(args.socket, 0o600)
-            print(f"codex-microd listening on {args.socket}", flush=True)
+
+            def terminate(*_: object) -> None:
+                # shutdown() blocks until serve_forever returns, so it must
+                # run on a thread other than the one serving requests.
+                threading.Thread(target=server.shutdown, daemon=True).start()
+
+            signal.signal(signal.SIGTERM, terminate)
+            signal.signal(signal.SIGHUP, reload_config)
+            log(f"listening on {args.socket}")
             server.serve_forever(poll_interval=0.25)
     except KeyboardInterrupt:
         pass

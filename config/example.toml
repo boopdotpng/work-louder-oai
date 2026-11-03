@@ -1,10 +1,84 @@
-# Commands are argv arrays and execute directly without a shell.
+# codex-microd configuration.
 #
-# MIC is the logical wide Mic key. It coalesces raw switches ACT10 and ACT11.
-# Replace these example paths with commands available on your machine.
+# macOS and Linux: ~/.config/codex-micro/config.toml
+# Reload mappings without restarting:
+#   macOS:  launchctl kill HUP gui/$(id -u)/com.github.boopdotpng.codex-microd
+#   Linux:  systemctl --user kill -s HUP codex-microd.service
+#
+# Commands are argv arrays and execute directly without a shell. launchd runs
+# with a minimal PATH, so prefer absolute program paths.
+
+[device]
+# auto prefers Bluetooth and falls back to USB. Use "bluetooth" or "usb" to
+# require one connection type.
+transport = "auto"
+# A device also matches when its product name contains this text, which covers
+# Bluetooth connections that advertise different vendor/product IDs.
+name = "Codex Micro"
+
+[joystick]
+# The analog stick becomes virtual keys JOY0..JOY(n-1). 0 disables them.
+sectors = 4
+# Angle (0..1) at the center of JOY0. Run `codex-microctl events joystick`,
+# push the stick in the direction you want JOY0 to be, and copy its angle.
+offset = 0.0
+# Press when the stick reaches this distance; release below `release`.
+press = 0.6
+release = 0.4
+
+# Every mappable control, in physical order:
+#
+#   AG00  AG01
+#   AG02  AG03  AG04  AG05
+#   ACT06 ACT07 ACT08 ACT09
+#   MIC (wide key)    ACT12
+#
+#   ENC_CC / ENC_CW   encoder steps        -> step
+#   ENC_CLK           encoder push         -> press / release
+#   JOY0 .. JOY3      joystick directions  -> press / release
+#
+# Keys accept press and release. Delete or extend the examples below.
+
+[mappings.AG00]
+press = ["/usr/bin/open", "-a", "Terminal"]
+
+[mappings.AG01]
+press = ["/usr/bin/open", "-a", "Safari"]
+
+[mappings.ACT09]
+# Shortcuts.app automations are an easy way to bind complex actions.
+press = ["/usr/bin/shortcuts", "run", "My Shortcut"]
+
 [mappings.MIC]
+# Hold-to-talk: separate commands on press and release.
 press = ["/path/to/start-recording"]
 release = ["/path/to/stop-recording"]
 
-[mappings.ACT09]
-press = ["/usr/bin/notify-send", "Codex Micro", "ACT09 pressed"]
+[mappings.ACT12]
+# Send a keyboard shortcut (Cmd+Shift+4). The process running codex-microd
+# needs Accessibility permission for System Events keystrokes.
+press = [
+  "/usr/bin/osascript", "-e",
+  "tell application \"System Events\" to key code 21 using {command down, shift down}",
+]
+
+[mappings.ENC_CW]
+step = [
+  "/usr/bin/osascript", "-e",
+  "set volume output volume ((output volume of (get volume settings)) + 4)",
+]
+
+[mappings.ENC_CC]
+step = [
+  "/usr/bin/osascript", "-e",
+  "set volume output volume ((output volume of (get volume settings)) - 4)",
+]
+
+[mappings.ENC_CLK]
+press = [
+  "/usr/bin/osascript", "-e",
+  "set volume output muted (not (output muted of (get volume settings)))",
+]
+
+[mappings.JOY0]
+press = ["/usr/bin/osascript", "-e", "tell application \"System Events\" to key code 126"]

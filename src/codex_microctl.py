@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import socket
 import sys
 from pathlib import Path
 from typing import Any
+
+from codex_micro import default_socket_path
 
 EFFECTS = (
     "off",
@@ -20,11 +21,6 @@ EFFECTS = (
     "gradient",
     "shallow-breath",
 )
-
-
-def default_socket_path() -> Path:
-    runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-    return Path(runtime) / "codex-microd.sock"
 
 
 def color(value: str) -> str:
@@ -56,11 +52,14 @@ def request(path: Path, method: str, params: dict[str, Any] | None = None) -> An
     return response.get("result")
 
 
-def events(path: Path) -> None:
+DEFAULT_EVENTS = ["key", "encoder", "joystick", "joystick.sector", "device"]
+
+
+def events(path: Path, names: list[str] | None = None) -> None:
     message = {
         "id": 1,
         "method": "events.subscribe",
-        "params": {"events": ["key", "encoder", "joystick", "device"]},
+        "params": {"events": names or DEFAULT_EVENTS},
     }
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.connect(str(path))
@@ -78,7 +77,13 @@ def main() -> int:
     parser.add_argument("--socket", type=Path, default=default_socket_path())
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
-    commands.add_parser("events")
+    events_parser = commands.add_parser("events")
+    events_parser.add_argument(
+        "names",
+        nargs="*",
+        metavar="EVENT",
+        help=f"event names to stream (default: {' '.join(DEFAULT_EVENTS)})",
+    )
 
     agent = commands.add_parser("agent")
     agent.add_argument("id", type=int, choices=range(6), metavar="0..5")
@@ -104,7 +109,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.command == "events":
-            events(args.socket)
+            events(args.socket, args.names)
             return 0
         if args.command == "status":
             result = request(args.socket, "device.status")
@@ -157,6 +162,8 @@ def main() -> int:
                 },
             )
         print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    except KeyboardInterrupt:
         return 0
     except (
         ConnectionError,

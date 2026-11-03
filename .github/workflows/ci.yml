@@ -9,10 +9,15 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.11", "3.12", "3.13", "3.14"]
+        include:
+          # Loads the real IOKit bindings and enumerates HID devices.
+          - os: macos-latest
+            python-version: "3.13"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7

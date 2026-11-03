@@ -35,14 +35,25 @@ and document a recovery path before any persistent experiment.
 ## Direct probing
 
 Only one process should consume the report-6 response stream. Stop the daemon
-before using the direct probe:
+(and quit the Codex desktop app, if installed) before using the direct probe:
 
 ```bash
+# macOS
+launchctl bootout gui/$(id -u)/com.github.boopdotpng.codex-microd
+codex-micro-probe list --all
+codex-micro-probe status
+codex-micro-probe monitor
+codex-micro-probe rpc fs.list '{"checksum":true}'
+./launchd/install.sh
+
+# Linux
 systemctl --user stop codex-microd.service
 codex-micro-probe status
-codex-micro-probe rpc fs.list '{"checksum":true}'
 systemctl --user start codex-microd.service
 ```
+
+`list` and `monitor` are read-only. `--transport bluetooth|usb` and `--name`
+choose the device the same way the daemon does.
 
 The raw `rpc` subcommand does not filter method names. Treat it like a firmware
 debugging tool, not an application API.
@@ -79,7 +90,10 @@ also coalescing them into the logical wide `MIC` key.
 - UTF-8 code points can also span reports; use an incremental decoder.
 - Notifications can arrive while waiting for an RPC response.
 - `/dev/hidrawN` numbers change after reconnect.
-- Match HID VID/PID (`303a:8360`) rather than a numbered device path.
+- Match HID VID/PID (`303a:8360`) or product name rather than a numbered
+  device path.
+- On macOS, keep every IOKit call for one device on the thread that opened
+  it.
 
 ## Clean-room rule
 
@@ -92,9 +106,9 @@ those facts in original code.
 
 When reporting a new result, include:
 
-- Device product and USB VID/PID
+- Device product and VID/PID as reported by `codex-micro-probe list`
 - Firmware version
-- USB or Bluetooth transport
+- Operating system and USB or Bluetooth transport
 - Request payload or input action
 - Exact response/notification
 - Visible behavior

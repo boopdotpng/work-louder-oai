@@ -1,7 +1,7 @@
 # Agent guide
 
-This repository is a clean, dependency-free Linux implementation of the
-Work Louder Codex Micro HID protocol.
+This repository is a clean, dependency-free macOS and Linux implementation of
+the Work Louder Codex Micro HID protocol.
 
 ## Start here
 
@@ -14,14 +14,16 @@ Work Louder Codex Micro HID protocol.
 ## Repository map
 
 ```text
-src/codex_micro.py       HID discovery, report framing, RPC transport, probe
+src/codex_micro.py       device selection, hidraw transport, framing, RPC, probe
+src/codex_micro_macos.py IOKit HID transport via ctypes (macOS)
 src/codex_microd.py      device owner, reconnect loop, event normalization, API
 src/codex_microctl.py    CLI client for the daemon socket
 tests/                   hardware-free unit tests
 docs/                    protocol, API, coverage, and extension notes
 examples/                client/configuration examples and factory keymap
-systemd/                 generic user service
-udev/                    device access rule
+launchd/                 macOS LaunchAgent template and installer
+systemd/                 Linux user service
+udev/                    Linux device access rule
 ```
 
 ## Verification
@@ -44,10 +46,19 @@ Live-device checks are optional and must be called out separately. Stop the
 daemon before opening the direct probe:
 
 ```bash
+# macOS
+launchctl bootout gui/$(id -u)/com.github.boopdotpng.codex-microd
+codex-micro-probe status
+./launchd/install.sh
+
+# Linux
 systemctl --user stop codex-microd.service
 codex-micro-probe status
 systemctl --user start codex-microd.service
 ```
+
+IOKit code cannot run on Linux CI; keep its logic testable through the fake
+frameworks in `tests/test_transport.py` and the macOS CI job.
 
 ## Safety invariants
 
@@ -66,7 +77,8 @@ systemctl --user start codex-microd.service
 
 - Python 3.11+ and the standard library only at runtime.
 - One process owns the HID descriptor; other programs use the Unix socket.
-- One worker thread serializes firmware RPC calls.
+- One worker thread serializes firmware RPC calls and owns the transport.
+- Never seize the HID device; its keyboard functions must keep working.
 - Preserve raw vendor events while exposing normalized application events.
 - Unknown notifications should remain observable as `vendor` events.
 - New API methods require protocol documentation and hardware-free tests.

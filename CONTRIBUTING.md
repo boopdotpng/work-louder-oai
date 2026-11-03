@@ -1,7 +1,8 @@
 # Contributing
 
 Contributions are welcome, especially captures from different firmware
-versions, Bluetooth testing, reconnect fixes, and client examples.
+versions, Bluetooth and macOS hardware testing, reconnect fixes, and client
+examples.
 
 ## Development setup
 
@@ -15,7 +16,8 @@ python3 -m unittest discover -s tests -v
 Install the commands from a checkout when live-device testing is needed:
 
 ```bash
-python3 -m pip install --user --editable .
+python3 -m pip install --user --editable .   # Linux
+pipx install --editable .                     # macOS
 ```
 
 ## Pull requests

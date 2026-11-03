@@ -8,11 +8,14 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from codex_micro import DeviceSelector  # noqa: E402
 from codex_microd import (  # noqa: E402
     ApiHandler,
     CommandMapper,
     DeviceWorker,
+    JoystickSectors,
     effect_code,
+    load_config,
     rgb,
     unit_interval,
 )
@@ -84,7 +87,7 @@ class LogicalMicTests(unittest.TestCase):
 class NotificationTests(unittest.TestCase):
     def test_encoder_and_joystick_are_normalized(self) -> None:
         mapper = RecordingMapper()
-        worker = DeviceWorker(mapper)
+        worker = DeviceWorker(mapper, joystick=JoystickSectors(sectors=0))
 
         worker._notification({"m": "v.oai.hid", "p": {"k": "ENC_CW", "act": 2}})
         worker._notification({"m": "v.oai.rad", "p": {"a": 0.75, "d": 1}})
@@ -125,6 +128,59 @@ class NotificationTests(unittest.TestCase):
                 }
             ],
         )
+
+
+class JoystickSectorTests(unittest.TestCase):
+    def sector_events(self, mapper: RecordingMapper) -> list[tuple[str, str]]:
+        return [
+            (event["data"]["key"], event["data"]["action"])
+            for event in mapper.events
+            if event["event"] == "joystick.sector"
+        ]
+
+    def test_sector_boundaries_are_centered_on_offset(self) -> None:
+        sectors = JoystickSectors(sectors=4, offset=0.1)
+        self.assertEqual(sectors.sector(0.1), 0)
+        self.assertEqual(sectors.sector(0.99), 0)
+        self.assertEqual(sectors.sector(0.2), 0)
+        self.assertEqual(sectors.sector(0.24), 1)
+        self.assertEqual(sectors.sector(0.6), 2)
+        self.assertEqual(sectors.sector(0.85), 3)
+
+    def test_press_move_and_release_with_hysteresis(self) -> None:
+        mapper = RecordingMapper()
+        worker = DeviceWorker(mapper)
+
+        for angle, distance in (
+            (0.0, 0.3),  # below press threshold
+            (0.0, 0.9),  # JOY0 press
+            (0.02, 0.5),  # inside hysteresis band: still held
+            (0.25, 1.0),  # moved to JOY1
+            (0.25, 0.1),  # released
+            (0, 0),
+        ):
+            worker._notification({"m": "v.oai.rad", "p": {"a": angle, "d": distance}})
+
+        self.assertEqual(
+            self.sector_events(mapper),
+            [
+                ("JOY0", "press"),
+                ("JOY0", "release"),
+                ("JOY1", "press"),
+                ("JOY1", "release"),
+            ],
+        )
+
+    def test_invalid_settings_are_rejected(self) -> None:
+        for settings in (
+            {"sectors": 17},
+            {"sectors": 4.0},
+            {"press": 1.5},
+            {"press": 0.3, "release": 0.5},
+        ):
+            with self.subTest(settings=settings):
+                with self.assertRaises(ValueError):
+                    JoystickSectors(**settings)
 
 
 class LightingStateTests(unittest.TestCase):
@@ -214,22 +270,28 @@ class ApiValidationTests(unittest.TestCase):
                     operation()
 
 
-class CommandMapperTests(unittest.TestCase):
+def write_config(directory: str, text: str) -> Path:
+    path = Path(directory) / "config.toml"
+    path.write_text(text)
+    return path
+
+
+class ConfigTests(unittest.TestCase):
     def test_loads_argv_mappings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "config.toml"
-            path.write_text(
-                """
+            config = load_config(
+                write_config(
+                    directory,
+                    """
 [mappings.MIC]
 press = ["/usr/bin/example", "--start"]
 release = ["/usr/bin/example", "--stop"]
-""".lstrip()
+""",
+                )
             )
 
-            mapper = CommandMapper(path)
-
         self.assertEqual(
-            mapper.mappings["MIC"],
+            config.mappings["MIC"],
             {
                 "press": ["/usr/bin/example", "--start"],
                 "release": ["/usr/bin/example", "--stop"],
@@ -238,11 +300,116 @@ release = ["/usr/bin/example", "--stop"]
 
     def test_rejects_shell_strings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "config.toml"
-            path.write_text('[mappings.MIC]\npress = "example --start"\n')
+            path = write_config(directory, '[mappings.MIC]\npress = "example"\n')
 
             with self.assertRaises(ValueError):
-                CommandMapper(path)
+                load_config(path)
+
+    def test_missing_file_uses_defaults(self) -> None:
+        config = load_config(Path("/nonexistent/codex-micro/config.toml"))
+
+        self.assertEqual(config.mappings, {})
+        self.assertEqual(config.selector, DeviceSelector())
+        self.assertEqual(config.joystick, JoystickSectors())
+
+    def test_device_and_joystick_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = load_config(
+                write_config(
+                    directory,
+                    """
+[device]
+transport = "bluetooth"
+name = "Micro"
+
+[joystick]
+sectors = 8
+offset = 0.25
+press = 0.7
+release = 0.2
+""",
+                )
+            )
+
+        self.assertEqual(config.selector, DeviceSelector("bluetooth", "Micro"))
+        self.assertEqual(config.joystick, JoystickSectors(8, 0.25, 0.7, 0.2))
+
+    def test_rejects_unknown_settings(self) -> None:
+        for text in (
+            '[device]\ntransport = "serial"\n',
+            "[device]\nport = 1\n",
+            "[joystick]\ndeadzone = 0.1\n",
+            '[joystick]\npress = "high"\n',
+            '[mappings.AG00]\nhold = ["/bin/true"]\n',
+        ):
+            with self.subTest(text=text):
+                with tempfile.TemporaryDirectory() as directory:
+                    with self.assertRaises(ValueError):
+                        load_config(write_config(directory, text))
+
+    def test_example_config_is_valid(self) -> None:
+        example = Path(__file__).resolve().parents[1] / "config" / "example.toml"
+        config = load_config(example)
+
+        for control in ("MIC", "ENC_CW", "ENC_CC", "ENC_CLK", "JOY0"):
+            self.assertIn(control, config.mappings)
+
+
+class RecordingCommandMapper(CommandMapper):
+    def __init__(self, mappings: dict[str, dict[str, list[str]]]) -> None:
+        super().__init__(mappings)
+        self.launched: list[list[str]] = []
+
+    def handle(self, event: dict[str, Any]) -> None:
+        import codex_microd
+
+        original = codex_microd.subprocess.Popen
+        codex_microd.subprocess.Popen = lambda argv, **_: self.launched.append(argv)
+        try:
+            super().handle(event)
+        finally:
+            codex_microd.subprocess.Popen = original
+
+
+class CommandMapperTests(unittest.TestCase):
+    def test_every_control_type_is_mappable(self) -> None:
+        mapper = RecordingCommandMapper(
+            {
+                "AG00": {"press": ["ag00"]},
+                "MIC": {"release": ["mic-up"]},
+                "ENC_CW": {"step": ["louder"]},
+                "ENC_CLK": {"press": ["mute"]},
+                "JOY2": {"press": ["down"]},
+            }
+        )
+        worker = DeviceWorker(mapper)
+
+        for message in (
+            {"m": "v.oai.hid", "p": {"k": "AG00", "act": 1}},
+            {"m": "v.oai.hid", "p": {"k": "AG00", "act": 0}},
+            {"m": "v.oai.hid", "p": {"k": "ACT10", "act": 1}},
+            {"m": "v.oai.hid", "p": {"k": "ACT10", "act": 0}},
+            {"m": "v.oai.hid", "p": {"k": "ENC_CW", "act": 2}},
+            {"m": "v.oai.hid", "p": {"k": "ENC_CLK", "act": 1}},
+            {"m": "v.oai.rad", "p": {"a": 0.5, "d": 1}},
+        ):
+            worker._notification(message)
+
+        self.assertEqual(
+            mapper.launched,
+            [["ag00"], ["mic-up"], ["louder"], ["mute"], ["down"]],
+        )
+
+    def test_raw_mic_switches_and_vendor_events_do_not_launch(self) -> None:
+        mapper = RecordingCommandMapper(
+            {"ACT10": {"press": ["raw"]}, "future.event": {"press": ["x"]}}
+        )
+        worker = DeviceWorker(mapper)
+
+        worker._notification({"m": "v.oai.hid", "p": {"k": "ACT10", "act": 1}})
+        worker._notification({"m": "future.event", "p": {}})
+
+        self.assertEqual(mapper.launched, [])
 
 
 if __name__ == "__main__":
